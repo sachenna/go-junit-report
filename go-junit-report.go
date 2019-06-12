@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jstemmer/go-junit-report/formatter"
-	"github.com/jstemmer/go-junit-report/parser"
+	"github.com/sachenna/go-junit-report/formatter"
+	"github.com/sachenna/go-junit-report/parser"
 )
 
 var (
@@ -32,12 +32,13 @@ func main() {
 	}
 
 	// Read input
-	report, err := parser.Parse(os.Stdin, packageName)
+	report, err := parser.ParseTemp(os.Stdin, packageName)
 	if err != nil {
 		fmt.Printf("Error reading input: %s\n", err)
 		os.Exit(1)
 	}
 
+	//fmt.Println("Package name: ", report.Packages[0].Name)
 	// Write xml
 	err = formatter.JUnitReportXML(report, noXMLHeader, goVersionFlag, os.Stdout)
 	if err != nil {

@@ -2,10 +2,10 @@ package parser
 
 import (
 	"bufio"
+	"encoding/json"
 	"io"
+	"path"
 	"regexp"
-	"strconv"
-	"strings"
 	"time"
 )
 
@@ -42,6 +42,7 @@ type Test struct {
 	Duration time.Duration
 	Result   Result
 	Output   []string
+	Failure  []string
 
 	SubtestIndent string
 
@@ -73,37 +74,14 @@ var (
 // Parse parses go test output from reader r and returns a report with the
 // results. An optional pkgName can be given, which is used in case a package
 // result line is missing.
-func Parse(r io.Reader, pkgName string) (*Report, error) {
+func ParseTemp(r io.Reader, pkgName string) (*Report, error) {
 	reader := bufio.NewReader(r)
 
 	report := &Report{make([]Package, 0)}
 
-	// keep track of tests we find
-	var tests []*Test
+	var suites = make(map[string]map[string]*Test)
 
-	// keep track of benchmarks we find
-	var benchmarks []*Benchmark
-
-	// sum of tests' time, use this if current test has no result line (when it is compiled test)
-	var testsTime time.Duration
-
-	// current test
-	var cur string
-
-	// keep track if we've already seen a summary for the current test
-	var seenSummary bool
-
-	// coverage percentage report for current package
-	var coveragePct string
-
-	// stores mapping between package name and output of build failures
-	var packageCaptures = map[string][]string{}
-
-	// the name of the package which it's build failure output is being captured
-	var capturedPackage string
-
-	// capture any non-test output
-	var buffers = map[string][]string{}
+	var cur *Test
 
 	// parse lines
 	for {
@@ -116,147 +94,134 @@ func Parse(r io.Reader, pkgName string) (*Report, error) {
 
 		line := string(l)
 
-		if strings.HasPrefix(line, "=== RUN ") {
-			// new test
-			cur = strings.TrimSpace(line[8:])
-			tests = append(tests, &Test{
-				Name:   cur,
-				Result: FAIL,
-				Output: make([]string, 0),
-			})
+		type Info struct {
+			Suite string
+			Test  string
+			Msg   string
+		}
 
-			// clear the current build package, so output lines won't be added to that build
-			capturedPackage = ""
-			seenSummary = false
-		} else if matches := regexBenchmark.FindStringSubmatch(line); len(matches) == 6 {
-			bytes, _ := strconv.Atoi(matches[4])
-			allocs, _ := strconv.Atoi(matches[5])
+		var info Info
 
-			benchmarks = append(benchmarks, &Benchmark{
-				Name:     matches[1],
-				Duration: parseNanoseconds(matches[3]),
-				Bytes:    bytes,
-				Allocs:   allocs,
-			})
-		} else if strings.HasPrefix(line, "=== PAUSE ") {
-			continue
-		} else if strings.HasPrefix(line, "=== CONT ") {
-			cur = strings.TrimSpace(line[8:])
-			continue
-		} else if matches := regexResult.FindStringSubmatch(line); len(matches) == 6 {
-			if matches[5] != "" {
-				coveragePct = matches[5]
-			}
-			if strings.HasSuffix(matches[4], "failed]") {
-				// the build of the package failed, inject a dummy test into the package
-				// which indicate about the failure and contain the failure description.
-				tests = append(tests, &Test{
-					Name:   matches[4],
-					Result: FAIL,
-					Output: packageCaptures[matches[2]],
+		if matches := regexResult.FindStringSubmatch(line); len(matches) == 6 {
+			for suite, testmap := range suites {
+				var finalTests []*Test
+				var suiteTime = time.Duration(0)
+				for _, testinfo := range testmap {
+					finalTests = append(finalTests, testinfo)
+					suiteTime += testinfo.Duration
+				}
+				report.Packages = append(report.Packages, Package{
+					Name:     suite,
+					Duration: suiteTime,
+					Time:     int(suiteTime / time.Millisecond),
+					Tests:    finalTests,
 				})
-			} else if matches[1] == "FAIL" && len(tests) == 0 && len(buffers[cur]) > 0 {
-				// This package didn't have any tests, but it failed with some
-				// output. Create a dummy test with the output.
-				tests = append(tests, &Test{
-					Name:   "Failure",
-					Result: FAIL,
-					Output: buffers[cur],
-				})
-				buffers[cur] = buffers[cur][0:0]
 			}
-
-			// all tests in this package are finished
-			report.Packages = append(report.Packages, Package{
-				Name:        matches[2],
-				Duration:    parseSeconds(matches[3]),
-				Tests:       tests,
-				Benchmarks:  benchmarks,
-				CoveragePct: coveragePct,
-
-				Time: int(parseSeconds(matches[3]) / time.Millisecond), // deprecated
-			})
-
-			buffers[cur] = buffers[cur][0:0]
-			tests = make([]*Test, 0)
-			benchmarks = make([]*Benchmark, 0)
-			coveragePct = ""
-			cur = ""
-			testsTime = 0
 		} else if matches := regexStatus.FindStringSubmatch(line); len(matches) == 4 {
-			cur = matches[2]
-			test := findTest(tests, cur)
-			if test == nil {
+
+			curTest := path.Base(matches[2])
+			var testdata *Test = nil
+			for _, testmap := range suites {
+				for test, testInfo := range testmap {
+					if test == curTest {
+						testdata = testInfo
+						break
+					}
+				}
+				if testdata != nil {
+					break
+				}
+			}
+
+			if testdata == nil {
+				cur = nil
 				continue
 			}
 
 			// test status
 			if matches[1] == "PASS" {
-				test.Result = PASS
+				testdata.Result = PASS
 			} else if matches[1] == "SKIP" {
-				test.Result = SKIP
+				testdata.Result = SKIP
 			} else {
-				test.Result = FAIL
+				testdata.Result = FAIL
 			}
 
-			if matches := regexIndent.FindStringSubmatch(line); len(matches) == 2 {
-				test.SubtestIndent = matches[1]
-			}
-
-			test.Output = buffers[cur]
-
-			test.Name = matches[2]
-			test.Duration = parseSeconds(matches[3])
-			testsTime += test.Duration
-
-			test.Time = int(test.Duration / time.Millisecond) // deprecated
-		} else if matches := regexCoverage.FindStringSubmatch(line); len(matches) == 2 {
-			coveragePct = matches[1]
-		} else if matches := regexOutput.FindStringSubmatch(line); capturedPackage == "" && len(matches) == 3 {
-			// Sub-tests start with one or more series of 4-space indents, followed by a hard tab,
-			// followed by the test output
-			// Top-level tests start with a hard tab.
-			test := findTest(tests, cur)
-			if test == nil {
-				continue
-			}
-			test.Output = append(test.Output, matches[2])
-		} else if strings.HasPrefix(line, "# ") {
-			// indicates a capture of build output of a package. set the current build package.
-			capturedPackage = line[2:]
-		} else if capturedPackage != "" {
-			// current line is build failure capture for the current built package
-			packageCaptures[capturedPackage] = append(packageCaptures[capturedPackage], line)
-		} else if regexSummary.MatchString(line) {
-			// don't store any output after the summary
-			seenSummary = true
-		} else if !seenSummary {
-			// buffer anything else that we didn't recognize
-			buffers[cur] = append(buffers[cur], line)
-
-			// if we have a current test, also append to its output
-			test := findTest(tests, cur)
-			if test != nil {
-				if strings.HasPrefix(line, test.SubtestIndent+"    ") {
-					test.Output = append(test.Output, strings.TrimPrefix(line, test.SubtestIndent+"    "))
+			testdata.Duration = parseSeconds(matches[3])
+			cur = testdata
+		} else if err := json.Unmarshal([]byte(line), &info); err == nil {
+			if testmap, mapok := suites[info.Suite]; mapok {
+				if test, ok := testmap[info.Test]; ok {
+					test.Output = append(test.Output, info.Msg)
+				} else {
+					t := &Test{
+						Name: info.Test,
+					}
+					t.Output = append(t.Output, info.Msg)
+					testmap[info.Test] = t
 				}
+			} else {
+				t := &Test{
+					Name: info.Test,
+				}
+				t.Output = append(t.Output, info.Msg)
+				m := make(map[string]*Test)
+				m[info.Test] = t
+				suites[info.Suite] = m
+			}
+		} else if cur != nil {
+			if cur.Result == FAIL {
+				cur.Failure = append(cur.Failure, line)
+			} else if cur.Result == SKIP {
+				cur.Output = append(cur.Output, line)
 			}
 		}
 	}
 
-	if len(tests) > 0 {
-		// no result line found
-		report.Packages = append(report.Packages, Package{
-			Name:        pkgName,
-			Duration:    testsTime,
-			Time:        int(testsTime / time.Millisecond),
-			Tests:       tests,
-			Benchmarks:  benchmarks,
-			CoveragePct: coveragePct,
-		})
+	return report, nil
+}
+
+type Info struct {
+	Suite string
+	Test  string
+	Msg   string
+}
+
+// parseLine parses the string
+func parseLine(t string, suites map[string]map[string]*Test) map[string]map[string]*Test {
+	if t == "" {
+		return suites
 	}
 
-	return report, nil
+	var info Info
+	err := json.Unmarshal([]byte(t), &info)
+	if err == nil {
+		if test, ok := suites[info.Suite]; !ok {
+			m := make(map[string]*Test)
+			t := &Test{
+				Name: info.Test,
+			}
+			t.Output = append(t.Output, info.Msg)
+			m[info.Test] = t
+			suites[info.Suite] = m
+		} else {
+			if t, present := test[info.Test]; present {
+				t.Output = append(t.Output, info.Msg)
+			} else {
+				t := &Test{
+					Name: info.Test,
+				}
+				t.Output = append(t.Output, info.Msg)
+				test[info.Test] = t
+				suites[info.Suite] = test
+			}
+		}
+		return suites
+
+	} else {
+		// Do nothing, random output which is not of json
+		return suites
+	}
 }
 
 func parseSeconds(t string) time.Duration {

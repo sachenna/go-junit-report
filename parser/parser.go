@@ -43,6 +43,7 @@ type Test struct {
 	Result   Result
 	Output   []string
 	Failure  []string
+	SkipMsg  []string
 
 	SubtestIndent string
 
@@ -74,7 +75,7 @@ var (
 // Parse parses go test output from reader r and returns a report with the
 // results. An optional pkgName can be given, which is used in case a package
 // result line is missing.
-func ParseTemp(r io.Reader, pkgName string) (*Report, error) {
+func Parse(r io.Reader, pkgName string) (*Report, error) {
 	reader := bufio.NewReader(r)
 
 	report := &Report{make([]Package, 0)}
@@ -117,6 +118,7 @@ func ParseTemp(r io.Reader, pkgName string) (*Report, error) {
 					Tests:    finalTests,
 				})
 			}
+			suites = make(map[string]map[string]*Test)
 		} else if matches := regexStatus.FindStringSubmatch(line); len(matches) == 4 {
 
 			curTest := path.Base(matches[2])
@@ -173,7 +175,7 @@ func ParseTemp(r io.Reader, pkgName string) (*Report, error) {
 			if cur.Result == FAIL {
 				cur.Failure = append(cur.Failure, line)
 			} else if cur.Result == SKIP {
-				cur.Output = append(cur.Output, line)
+				cur.SkipMsg = append(cur.SkipMsg, line)
 			}
 		}
 	}

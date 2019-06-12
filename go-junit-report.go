@@ -32,7 +32,7 @@ func main() {
 	}
 
 	// Read input
-	report, err := parser.ParseTemp(os.Stdin, packageName)
+	report, err := parser.Parse(os.Stdin, packageName)
 	if err != nil {
 		fmt.Printf("Error reading input: %s\n", err)
 		os.Exit(1)

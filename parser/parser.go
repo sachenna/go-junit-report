@@ -14,8 +14,8 @@ type Result int
 
 // Test result constants
 const (
-	PASS Result = iota
-	FAIL
+	FAIL Result = iota
+	PASS
 	SKIP
 )
 

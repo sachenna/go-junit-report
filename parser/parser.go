@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"io"
 	"path"
+	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -14,8 +16,8 @@ type Result int
 
 // Test result constants
 const (
-	FAIL Result = iota
-	PASS
+	PASS Result = iota
+	FAIL
 	SKIP
 )
 
@@ -84,6 +86,9 @@ func Parse(r io.Reader, pkgName string) (*Report, error) {
 
 	var cur *Test
 
+	var currentTest string
+	var currentSuite string
+
 	// parse lines
 	for {
 		l, _, err := reader.ReadLine()
@@ -94,6 +99,37 @@ func Parse(r io.Reader, pkgName string) (*Report, error) {
 		}
 
 		line := string(l)
+
+		if strings.HasPrefix(line, "=== RUN ") {
+			fullTestPath := strings.TrimSpace(line[8:])
+			currentTest = filepath.Base(fullTestPath)
+			currentSuite = filepath.Base(filepath.Dir(fullTestPath))
+		}
+
+		if strings.Contains(line, "test timed out after") {
+			for suite, testmap := range suites {
+				var finalTests []*Test
+				var suiteTime = time.Duration(0)
+				for _, testinfo := range testmap {
+					finalTests = append(finalTests, testinfo)
+					suiteTime += testinfo.Duration
+				}
+				if filepath.Base(suite) == currentSuite {
+					t := &Test{
+						Name:   currentTest,
+						Result: FAIL,
+					}
+					finalTests = append(finalTests, t)
+				}
+				report.Packages = append(report.Packages, Package{
+					Name:     suite,
+					Duration: suiteTime,
+					Time:     int(suiteTime / time.Millisecond),
+					Tests:    finalTests,
+				})
+			}
+			return report, nil
+		}
 
 		type Info struct {
 			Suite string
